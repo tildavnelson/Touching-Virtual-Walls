@@ -1,0 +1,212 @@
+﻿import math
+import json
+import time
+
+MQTT_TOPIC = 'student/dissertation/tilda/sticks'
+STICK_LEN  = 0.4
+
+PIVOTS = {
+    's': (0.0,    0.055, -0.08),
+    'n': (0.0,    0.07,  -0.08),
+    'e': (-0.024, 0.031, -0.08),
+    'w': (0.024,  0.031, -0.08),
+}
+
+SWING = {'n': 'x', 's': 'x', 'e': 'y', 'w': 'y'}
+
+# Signed angle ranges (from your OPEN signs: n:+1, s:-1, e:+1, w:-1).
+# The swept angle IS the rendered rx/ry. Flip a range to reverse a stick.
+RANGE = {
+    's': (0, 160),
+    'n': (-160, 0),
+    'e': (0, 160),
+    'w': (-160, 0),
+}
+
+# Walls as bounded rectangles: (axis, transform path, width, height)
+# axis 'z' = wall faces along z (no rotation on its transform)
+# axis 'x' = wall faces along x (ry=90 on its transform)
+WALLS = [
+    ('z', '/project1/geo2/transform2', 3.0, 2.5),
+    ('x', '/project1/geo2/transform3', 3.0, 2.5),
+    ('z', '/project1/geo2/transform4', 3.0, 2.5),
+]
+
+SNAP_THRESH    = 0.10
+RELEASE_THRESH = 0.15
+TIE_EPS        = 0.005
+EASE           = 0.35   # fraction toward target per update: higher = snappier, lower = more languid
+
+def euler_to_matrix(rx_deg, ry_deg, rz_deg):
+    rx = math.radians(rx_deg); ry = math.radians(ry_deg); rz = math.radians(rz_deg)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    Rx = [[1,0,0],[0,cx,-sx],[0,sx,cx]]
+    Ry = [[cy,0,sy],[0,1,0],[-sy,0,cy]]
+    Rz = [[cz,-sz,0],[sz,cz,0],[0,0,1]]
+    def mm(A,B):
+        return [[sum(A[i][k]*B[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+    return mm(mm(Rz, Ry), Rx)   # matches TD's "Rx Ry Rz" rotate order
+
+def apply_mat(M, v):
+    return (
+        M[0][0]*v[0] + M[0][1]*v[1] + M[0][2]*v[2],
+        M[1][0]*v[0] + M[1][1]*v[1] + M[1][2]*v[2],
+        M[2][0]*v[0] + M[2][1]*v[1] + M[2][2]*v[2],
+    )
+
+def stick_vec(sid, angle_deg):
+    # Stick vector from pivot for a given SIGNED angle,
+    # matching the rotation TD applies about the swing axis.
+    a = math.radians(angle_deg)
+    if SWING[sid] == 'x':
+        return (0.0, -STICK_LEN*math.sin(a), -STICK_LEN*math.cos(a))
+    else:
+        return (-STICK_LEN*math.sin(a), 0.0, -STICK_LEN*math.cos(a))
+
+def wall_dist(tip_world, walls):
+    # true 3D distance from tip to the nearest BOUNDED wall rectangle
+    tx_, ty_, tz_ = tip_world
+    best = None
+    for axis, cx, cy, cz, w, h in walls:
+        if axis == 'z':
+            dx = max(abs(tx_ - cx) - w/2, 0.0)
+            dy = max(abs(ty_ - cy) - h/2, 0.0)
+            dz = tz_ - cz
+        else:
+            dx = tx_ - cx
+            dy = max(abs(ty_ - cy) - h/2, 0.0)
+            dz = max(abs(tz_ - cz) - w/2, 0.0)
+        d = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if best is None or d < best:
+            best = d
+    return best
+
+def onSetupParameters(scriptOp): return
+def onPulse(par): return
+
+def onCook(scriptOp):
+    # VIVE/UWB switch first — state 0 = UWB mode, this script stays silent
+    if op('/project1/vive_uwb_switch').panel.state == 0:
+        return
+
+    now = time.time()
+    last = scriptOp.fetch('_last_pub', 0)
+    if (now - last) < 0.1:
+        return
+    scriptOp.store('_last_pub', now)
+
+    prev_angles = scriptOp.fetch('prev_angles', {'n':0.0,'s':0.0,'e':0.0,'w':0.0})
+
+    scriptOp.clear()
+    scriptOp.appendRow(['stick', 'rx', 'ry', 'min_dist'])
+
+    try:
+        vr = op('/project1/openvr1')
+
+        # tracking guard: if tracker not tracked, close once and go silent
+        tracked = float(vr['tracker1:tracked'])
+        if tracked < 0.5:
+            scriptOp.appendRow(['STATUS', 'tracker not tracked', 0, 0])
+            was_tracking = scriptOp.fetch('_was_tracking', False)
+            if was_tracking:
+                closed = {'n': 0.0, 's': 0.0, 'e': 0.0, 'w': 0.0}
+                op('mqttclient1').publish(MQTT_TOPIC, json.dumps(closed).encode())
+                scriptOp.store('prev_angles', dict(closed))
+            scriptOp.store('_was_tracking', False)
+            return
+        scriptOp.store('_was_tracking', True)
+
+        # read wall positions live from the actual grid transforms
+        walls = []
+        for axis, path, w, h in WALLS:
+            o = op(path)
+            if o is None:
+                continue
+            walls.append((axis,
+                          float(o.par.tx),
+                          float(o.par.ty),
+                          float(o.par.tz),
+                          w, h))
+
+        # tracker pose — matching transformvivetracking exactly
+        ex = float(vr['tracker1:rx'])
+        ey = float(vr['tracker1:ry'])
+        ez = float(vr['tracker1:rz'])
+        tx = float(vr['tracker1:tx'])
+        ty = float(vr['tracker1:ty']) - 0.08
+        tz = float(vr['tracker1:tz'])
+
+        # pivots and stick length are in world metres — no assembly scale
+        asm_scale = 1.0
+
+        # same remap the render's transformvivetracking uses (rx-90, ry, rz)
+        M = euler_to_matrix(ex - 90.0, ey, ez)
+
+        scriptOp.appendRow(['DEBUG_pos', round(tx,3), round(ty,3), round(tz,3)])
+
+        servo_vals = {}
+
+        for sid, (px, py, pz) in PIVOTS.items():
+            lo, hi = RANGE[sid]
+            prev = prev_angles.get(sid, 0.0)
+
+            best_ang  = 0.0
+            best_dist = None
+
+            step = 1 if hi >= lo else -1
+            for ang in range(lo, hi + step, step):
+                sv = stick_vec(sid, ang)
+                # full local tip = pivot + stick vector, then assembly scale
+                tl = (px + sv[0], py + sv[1], pz + sv[2])
+                tl = (tl[0]*asm_scale, tl[1]*asm_scale, tl[2]*asm_scale)
+                rx_, ry_, rz_ = apply_mat(M, tl)
+                tip_world = (tx + rx_, ty + ry_, tz + rz_)
+
+                dist = wall_dist(tip_world, walls)
+                if dist is None:
+                    continue
+
+                if best_dist is None:
+                    best_dist = dist
+                    best_ang  = ang
+                elif dist < best_dist - TIE_EPS:
+                    best_dist = dist
+                    best_ang  = ang
+                elif abs(dist - best_dist) <= TIE_EPS:
+                    # tie: prefer the angle closest to where the stick already is
+                    if abs(ang - prev) < abs(best_ang - prev):
+                        best_ang  = ang
+                        best_dist = min(best_dist, dist)
+
+            # hysteresis: looser threshold to release if this stick was already open
+            thresh = RELEASE_THRESH if abs(prev) > 1.0 else SNAP_THRESH
+            target = float(best_ang) if (best_dist is not None and best_dist < thresh) else 0.0
+
+            # ease toward the target instead of snapping
+            angle = prev + (target - prev) * EASE
+            if target == 0.0 and abs(angle) < 2.0:
+                angle = 0.0   # settle fully closed
+
+            prev_angles[sid] = angle
+
+            rx_out = round(angle, 2) if SWING[sid] == 'x' else 0.0
+            ry_out = round(angle, 2) if SWING[sid] == 'y' else 0.0
+
+            scriptOp.appendRow([sid, rx_out, ry_out,
+                round(best_dist, 4) if best_dist is not None else -1])
+            servo_vals[sid] = round(abs(angle), 1)
+
+        scriptOp.store('prev_angles', prev_angles)
+
+        scriptOp.appendRow(['EULER', round(ex, 3), round(ey, 3), round(ez, 3)])
+
+        servo_vals['e'], servo_vals['w'] = servo_vals['w'], servo_vals['e']
+        op('mqttclient1').publish(MQTT_TOPIC, json.dumps(servo_vals).encode())
+
+    except Exception as e:
+        scriptOp.appendRow(['ERROR', str(e)])
+
+def onGetCookLevel(scriptOp):
+    return CookLevel.ALWAYS
