@@ -6,7 +6,7 @@ The object senses its pose, publishes it to an MQTT broker, and TouchDesigner mi
 
 📹 **Outdoor UWB demo:** https://youtu.be/p2YoM8ZEzS0
 
-This repository contains the firmware, TouchDesigner project, scripts, 3D models, and setup details needed to reproduce the system. It accompanies the dissertation *Touching Virtual Walls* and documents the first (UWB) prototype in full technical detail. Wherever the dissertation defers a technical point to "the project repository," the detail lives in the relevant section below.
+This repository contains the firmware, TouchDesigner project, scripts, 3D models, and setup details needed to reproduce the system. It accompanies the dissertation *Touching Virtual Walls* and documents the first (UWB) prototype in full technical detail.
 
 ---
 
@@ -14,8 +14,7 @@ This repository contains the firmware, TouchDesigner project, scripts, 3D models
 
 Sensors → ESP32 (fusion) → MQTT → TouchDesigner (compute angles) → MQTT → ESP32 → servos
 
-
-The pipeline is a closed loop:
+<img width="1101" height="447" alt="Device data flow-flow chart" src="https://github.com/user-attachments/assets/dcc2ae06-0719-4d52-bce8-58254b03f490" />
 
 1. **Recording the physical.** The ESP32-S3 reads UWB position (DWM1001C) and IMU orientation (BNO055), rejects implausible readings, and fuses position through per-axis Kalman filters.
 2. **Physical puppeteering the virtual.** The ESP32 publishes the fused pose as JSON over MQTT.
@@ -39,6 +38,9 @@ The canonical implementation of stages 1, 2 and 4 is `firmware/combined_firmware
 
 **Wiring**
 
+<img width="2036" height="1531" alt="skematics uwb drawio" src="https://github.com/user-attachments/assets/a77911ca-e21a-4f88-8f7a-9fc9b1419639" />
+
+
 - I²C (BNO055 at `0x28` + PCA9685 at `0x40`): SDA = GPIO8, SCL = GPIO9 (`Wire.begin(8, 9)`)
 - UART to the UWB tag: RX = GPIO44, TX = GPIO43, 115200 baud, 8N1 (`DWM.begin(115200, SERIAL_8N1, 44, 43)`)
 - Servo channels on the PCA9685: N = 0, E = 3, S = 2, W = 1
@@ -46,15 +48,16 @@ The canonical implementation of stages 1, 2 and 4 is `firmware/combined_firmware
 
 The BNO055 is initialised with axis remap `P1` and the external crystal enabled; the PCA9685 runs at 50 Hz.
 
-> The Vive-tracked exhibition prototype (Prototype 2) replaces the UWB/IMU pose feed with a SteamVR CHOP in TouchDesigner; the servo-actuation half of the firmware is unchanged. See the dissertation for that deployment.
+> The Vive-tracked exhibition prototype (Prototype 2) replaces the UWB/IMU pose feed with a SteamVR CHOP in TouchDesigner; the servo-actuation half of the firmware is unchanged. .
 
----
+<img width="1356" height="709" alt="Screenshot 2026-08-19 202649" src="https://github.com/user-attachments/assets/916d75ba-eb57-4da3-8a1b-7bf5f642b8bb" />
+
 
 ## Firmware (`/firmware`)
 
 `combined_firmware.ino` — runs on the ESP32-S3.
 
-**Before flashing, set your own credentials and topics at the top** (they ship blank in the repo):
+**Before flashing, set credentials and topics at the top** (blank in the repo):
 
 ```cpp
 const char* ssid         = "YOUR_SSID";
@@ -66,9 +69,9 @@ const char* petals_topic = "YOUR_STICKS_TOPIC";   // TouchDesigner → object
 
 The main loop runs four things on independent timers: a fusion update every 20 ms, a DWM position request every 100 ms, a pose publish every 100 ms, and continuous MQTT servicing. The sections below correspond one-to-one to the pipeline stages.
 
-### 1. Requesting position from the DWM1001C
+### 1. Requesting position from the DWM1001C Dev board
 
-Every 100 ms the ESP32 wakes the DWM1001C and asks for a position report over UART:
+Every 100 ms the ESP32 wakes the DWM1001 and asks for a position report over UART:
 
 write 0xFF // wake byte — brings the DWM1001C out of low-power sleep
 delay 10 ms
