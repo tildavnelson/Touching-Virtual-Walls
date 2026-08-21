@@ -4,7 +4,7 @@ A handheld kinetic object that traces invisible virtual walls through movement. 
 
 The object senses its pose, publishes it to an MQTT broker, and TouchDesigner mirrors it in a virtual scene, calculates each stick's angle against the virtual walls, and publishes the angles back for the ESP32 to drive the servos — a closed loop between the physical object and its virtual model.
 
-📹 **Outdoor UWB demo:** https://youtu.be/p2YoM8ZEzS0
+ **Outdoor UWB demo:** https://youtu.be/p2YoM8ZEzS0
 
 This repository contains the firmware, TouchDesigner project, scripts, 3D models, and setup details needed to reproduce the system. It accompanies the dissertation *Touching Virtual Walls* and documents the first (UWB) prototype in full technical detail.
 
